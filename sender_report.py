@@ -5,7 +5,10 @@ Read-only sender-volume report for a mailbox exposed by Proton Mail Bridge.
 Credentials come from the environment (the Bridge-generated IMAP username and
 password, not the Proton account password):
 
-    BRIDGE_USER, BRIDGE_PASS [, BRIDGE_HOST, BRIDGE_PORT]
+    BRIDGE_USER, BRIDGE_PASS [, BRIDGE_HOST, BRIDGE_PORT, BRIDGE_STARTTLS]
+
+When connecting through imap_gate.py, use its port, set BRIDGE_STARTTLS=0, and
+any placeholder user and password.
 
 Usage: sender_report.py [--folder INBOX] [--top 40] [--csv senders.csv]
 
@@ -44,7 +47,8 @@ def connect():
     ctx.verify_mode = ssl.CERT_NONE
 
     conn = imaplib.IMAP4(host, port)
-    conn.starttls(ssl_context=ctx)
+    if os.environ.get("BRIDGE_STARTTLS", "1") != "0":
+        conn.starttls(ssl_context=ctx)
     conn.login(user, password)
     return conn
 
@@ -85,15 +89,18 @@ def main():
     args = ap.parse_args()
 
     conn = connect()
-    status, _ = conn.select(f'"{args.folder}"', readonly=True)
+    folder = args.folder.replace("\\", "\\\\").replace('"', '\\"')
+    status, _ = conn.select(f'"{folder}"', readonly=True)
     if status != "OK":
         sys.exit(f"Cannot open folder {args.folder!r}.")
-    _, data = conn.search(None, "ALL")
+    status, data = conn.search(None, "ALL")
+    if status != "OK":
+        sys.exit("SEARCH failed.")
     ids = data[0].split()
     print(f"{len(ids)} messages in {args.folder}", file=sys.stderr)
 
     senders = defaultdict(
-        lambda: {"count": 0, "bytes": 0, "unsub": 0, "subjects": [], "last": ""}
+        lambda: {"count": 0, "bytes": 0, "unsub": 0, "subjects": []}
     )
     for size, msg in fetch_headers(conn, ids):
         addr = parseaddr(decode(msg["From"]))[1].lower() or "(unknown)"
@@ -101,7 +108,6 @@ def main():
         s["count"] += 1
         s["bytes"] += size
         s["unsub"] += bool(msg["List-Unsubscribe"])
-        s["last"] = max(s["last"], msg["Date"] or "")
         if len(s["subjects"]) < 3:
             s["subjects"].append(decode(msg["Subject"]).replace("\n", " ")[:80])
     conn.logout()
